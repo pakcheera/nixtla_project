@@ -3,9 +3,6 @@ import numpy as np
 from collections import defaultdict, deque
 
 from hierarchicalforecast.methods import BottomUp, TopDown, MiddleOut
-from collections import defaultdict, deque
-import numpy as np
-import pandas as pd
 
 
 class Hierarchy:

@@ -1,5 +1,5 @@
 
-# main.py
+# utils.py - Hierarchical Forecasting Utilities
 import json
 import math
 from pathlib import Path
@@ -9,73 +9,174 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-
 from factories import ModelFactory
-
 from utilsforecast.losses import rmse
-
 from hierarchicalforecast.core import HierarchicalReconciliation
 from hierarchicalforecast.utils import aggregate
 from mlforecast import MLForecast
-
-from functools import partial
 from hierarchicalforecast.evaluation import evaluate
-from utilsforecast.losses import rmse, mase
 
 
+# ==================== CONFIG & MODELS ====================
 
 def load_config(path: str = "config.json") -> dict:
+    """Load configuration from JSON file."""
     with open(path, "r") as f:
         return json.load(f)
-def build_level_lookup(tags: dict) -> dict:
-    """Map unique_id -> level name from H.tags."""
-    uid_to_level = {}
-    for level, uids in tags.items():
-        for uid in uids:
-            uid_to_level[uid] = level
-    return uid_to_level
-
-
-def rmse_grouped(df: pd.DataFrame, y_col: str, pred_cols: list[str], group_cols: list[str]) -> pd.DataFrame:
-    """Compute RMSE for each pred col grouped by group_cols."""
-    rows = []
-    for col in pred_cols:
-        tmp = df.dropna(subset=[y_col, col])
-        if tmp.empty:
-            continue
-        g = tmp.groupby(group_cols).apply(lambda x: float(np.sqrt(np.mean((x[y_col] - x[col]) ** 2))))
-        out = g.reset_index(name="rmse")
-        out["pred_col"] = col
-        rows.append(out)
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=group_cols + ["rmse", "pred_col"])
 
 
 def build_models(model_cfg: dict):
+    """Build ML models from config dictionary."""
     return [ModelFactory.get_model(name, **params) for name, params in model_cfg.items()]
 
 
-def build_leaf_node_map(parent_of: dict, leaves: list[str]) -> pd.DataFrame:
-    """
-    leaf -> all ancestors (including itself) mapping for aggregation.
-    """
-    rows = []
-    for leaf in leaves:
-        cur = leaf
-        while cur != "":
-            rows.append((leaf, cur))
-            cur = parent_of.get(cur, "")
-    return pd.DataFrame(rows, columns=["leaf", "node"]).drop_duplicates()
+# ==================== DATA UTILITIES ====================
+
+def flatten_spec(spec: list[list[str]]) -> list[str]:
+    """Extract unique hierarchy column names from spec."""
+    cols = []
+    for lvl in spec:
+        for c in lvl:
+            if c not in cols:
+                cols.append(c)
+    return cols
 
 
-def aggregate_up(df_bottom: pd.DataFrame, leaf_node_map: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
-    """
-    df_bottom must have ['unique_id','ds'] + value_cols at bottom level only.
-    Returns all levels aggregated by summation.
-    """
-    merged = df_bottom.merge(leaf_node_map, left_on="unique_id", right_on="leaf", how="inner")
-    out = merged.groupby(["node", "ds"], as_index=False)[value_cols].sum()
-    out = out.rename(columns={"node": "unique_id"})
+def build_eval_tags(tags: dict) -> dict:
+    """Auto-create evaluation groups by hierarchy level."""
+    keys = list(tags.keys())
+    
+    def depth(k: str) -> int:
+        if k.startswith("level_") and k.split("_")[-1].isdigit():
+            return int(k.split("_")[-1])
+        return k.count("/")
+    
+    keys_sorted = sorted(keys, key=depth)
+    total_key = keys_sorted[0]
+    bottom_key = keys_sorted[-1]
+    
+    eval_tags = {"total": tags[total_key], "bottom": tags[bottom_key]}
+    if len(keys_sorted) >= 2:
+        eval_tags["mid"] = tags[keys_sorted[1]]
+    return eval_tags
+
+
+def shorten_reconciler_names(df: pd.DataFrame, base_col: str) -> pd.DataFrame:
+    """Shorten long reconciler column names for readability."""
+    rename_map = {}
+    for col in df.columns:
+        if col.startswith(f"{base_col}/"):
+            parts = col.split("/")[1:]
+            method = parts[0]
+            
+            if method == "BottomUp":
+                short_name = f"{base_col}/BottomUp"
+            elif method.startswith("TopDown"):
+                if "forecast_proportions" in method:
+                    short_name = f"{base_col}/TD_FP"
+                elif "proportion_averages" in method:
+                    short_name = f"{base_col}/TD_PA"
+                else:
+                    short_name = f"{base_col}/TD"
+            elif method.startswith("MiddleOut"):
+                if "forecast_proportions" in method:
+                    short_name = f"{base_col}/MO_FP"
+                elif "proportion_averages" in method:
+                    short_name = f"{base_col}/MO_PA"
+                else:
+                    short_name = f"{base_col}/MO"
+            else:
+                short_name = col
+            
+            if short_name in rename_map.values():
+                counter = 2
+                while f"{short_name}_{counter}" in rename_map.values():
+                    counter += 1
+                short_name = f"{short_name}_{counter}"
+            
+            rename_map[col] = short_name
+    
+    return df.rename(columns=rename_map)
+
+
+# ==================== PLOTTING ====================
+
+def ensure_hier_cols(df: pd.DataFrame, hier_cols: list[str], H) -> pd.DataFrame:
+    """Ensure df has hierarchy columns; if not, try merging from H.paths_df."""
+    if all(c in df.columns for c in hier_cols):
+        return df
+
+    if not hasattr(H, "paths_df"):
+        raise ValueError(f"Missing hierarchy columns {hier_cols} and H.paths_df not available")
+
+    missing_ids = df["unique_id"].unique()
+    paths_df = H.create_paths_df_for_ids(missing_ids)
+
+    need_cols = ["unique_id"] + hier_cols
+    miss = [c for c in need_cols if c not in paths_df.columns]
+    if miss:
+        raise ValueError(f"H.paths_df missing columns: {miss}")
+
+    map_df = paths_df[need_cols].drop_duplicates("unique_id").reset_index(drop=True)
+    
+    if map_df.duplicated(subset=["unique_id"]).any():
+        dups = map_df[map_df.duplicated(subset=["unique_id"], keep=False)]
+        raise ValueError("Duplicate unique_ids in hierarchy mapping")
+    
+    out = df.merge(map_df, on="unique_id", how="left", validate="m:1")
+
+    if out[hier_cols].isna().any().any():
+        bad = out.loc[out[hier_cols].isna().any(axis=1), "unique_id"].unique()[:10]
+        raise ValueError(f"Unmapped unique_ids: {bad}")
     return out
+
+
+def get_fitted_values_or_none(ml_forecast: MLForecast, best_model_name: str) -> pd.DataFrame | None:
+    """Try to obtain in-sample fitted values for MinTrace/ERM."""
+    if hasattr(ml_forecast, "predict_in_sample"):
+        fitted = ml_forecast.predict_in_sample()
+        pred_col = None
+        for c in ["y_hat", "y_pred", "y", best_model_name]:
+            if c in fitted.columns and c not in ["unique_id", "ds"]:
+                pred_col = c
+                break
+        if pred_col is None:
+            num_cols = [c for c in fitted.columns if c not in ["unique_id", "ds"]]
+            pred_col = num_cols[-1]
+        fitted = fitted.rename(columns={pred_col: best_model_name})
+        return fitted[["unique_id", "ds", best_model_name]]
+    return None
+
+
+def filter_reconcilers_if_no_fitted(reconcilers: list, has_fitted: bool) -> list:
+    """Filter reconcilers that need residual covariance if no fitted values available."""
+    if has_fitted:
+        return reconcilers
+    bad_names = {"MinTrace", "ERM"}
+    return [r for r in reconcilers if r.__class__.__name__ not in bad_names]
+
+
+def debug_identity(Y_rec_df: pd.DataFrame, base_col: str):
+    """Warn if reconciliation columns equal base forecast."""
+    rec_cols = [c for c in Y_rec_df.columns if c.startswith(f"{base_col}/")]
+    if not rec_cols:
+        return
+    base = Y_rec_df[base_col]
+    for c in rec_cols:
+        diff = (Y_rec_df[c] - base).abs().sum()
+        if diff == 0:
+            print(f"[DEBUG] {c} is IDENTICAL to base -> reconciliation did not change forecasts.")
+
+
+def load_config(path: str = "config.json") -> dict:
+    """Load configuration from JSON file."""
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def build_models(model_cfg: dict):
+    """Build ML models from config dictionary."""
+    return [ModelFactory.get_model(name, **params) for name, params in model_cfg.items()]
 
 
 def plot_cutoff_subplots(
@@ -229,159 +330,6 @@ def run_cv_reconcile_save_each_window(
         img_dir.mkdir(exist_ok=True, parents=True)
 
     # -------------------------
-    # Helpers
-    # -------------------------
-    def flatten_spec(spec: list[list[str]]) -> list[str]:
-        cols = []
-        for lvl in spec:
-            for c in lvl:
-                if c not in cols:
-                    cols.append(c)
-        return cols
-
-    def ensure_hier_cols(df: pd.DataFrame, hier_cols: list[str]) -> pd.DataFrame:
-        """Ensure df has hierarchy columns; if not, try merging from H.paths_df."""
-        if all(c in df.columns for c in hier_cols):
-            return df
-
-        if not hasattr(H, "paths_df"):
-            raise ValueError(
-                f"Missing hierarchy columns {hier_cols} in df, and H.paths_df not found.\n"
-                f"Either add these columns to ml_data/cv_df, or set H.paths_df with mapping."
-            )
-
-        # Get unique_ids that need hierarchy mapping
-        missing_ids = df["unique_id"].unique()
-        
-        # Create paths_df for these specific IDs (handles orphans)
-        paths_df = H.create_paths_df_for_ids(missing_ids)
-
-        need_cols = ["unique_id"] + hier_cols
-        miss = [c for c in need_cols if c not in paths_df.columns]
-        if miss:
-            raise ValueError(f"H.paths_df exists but missing columns: {miss}")
-
-        # Ensure we have unique mapping (drop duplicates)
-        map_df = paths_df[need_cols].drop_duplicates("unique_id").reset_index(drop=True)
-        
-        # Check for any remaining duplicates
-        if map_df.duplicated(subset=["unique_id"]).any():
-            dups = map_df[map_df.duplicated(subset=["unique_id"], keep=False)]
-            raise ValueError("Duplicate unique_ids found in hierarchy mapping")
-        
-        # Merge carefully to avoid duplicate columns
-        out = df.merge(map_df, on="unique_id", how="left", validate="m:1")
-
-        # sanity: any unmapped?
-        if out[hier_cols].isna().any().any():
-            bad = out.loc[out[hier_cols].isna().any(axis=1), "unique_id"].unique()[:10]
-            raise ValueError(
-                f"Some unique_id could not be mapped to hierarchy columns. Examples: {bad}\n"
-                f"Fix your H.paths_df mapping for these ids."
-            )
-        return out
-
-    def build_eval_tags(tags: dict) -> dict:
-        """Auto-create evaluation groups similar to Nixtla example."""
-        keys = list(tags.keys())
-
-        def depth(k: str) -> int:
-            if k.startswith("level_") and k.split("_")[-1].isdigit():
-                return int(k.split("_")[-1])
-            return k.count("/")  # 0 for total, bigger for deeper
-
-        keys_sorted = sorted(keys, key=depth)
-        total_key = keys_sorted[0]
-        bottom_key = keys_sorted[-1]
-
-        eval_tags = {"total": tags[total_key], "bottom": tags[bottom_key]}
-        if len(keys_sorted) >= 2:
-            eval_tags["mid"] = tags[keys_sorted[1]]
-        return eval_tags
-
-    def get_fitted_values_or_none(ml_forecast: MLForecast) -> pd.DataFrame | None:
-        """
-        Try to obtain in-sample fitted values for MinTrace/ERM.
-        Works if your MLForecast version supports predict_in_sample().
-        """
-        if hasattr(ml_forecast, "predict_in_sample"):
-            fitted = ml_forecast.predict_in_sample()
-            # try to guess the prediction column
-            pred_col = None
-            for c in ["y_hat", "y_pred", "y", best_model_name]:
-                if c in fitted.columns and c not in ["unique_id", "ds"]:
-                    pred_col = c
-                    break
-            if pred_col is None:
-                # fallback: last numeric column
-                num_cols = [c for c in fitted.columns if c not in ["unique_id", "ds"]]
-                pred_col = num_cols[-1]
-            fitted = fitted.rename(columns={pred_col: best_model_name})
-            return fitted[["unique_id", "ds", best_model_name]]
-        return None
-
-    def filter_reconcilers_if_no_fitted(reconcilers: list, has_fitted: bool) -> list:
-        """If no fitted values, drop methods that typically need residual covariance."""
-        if has_fitted:
-            return reconcilers
-        bad_names = {"MinTrace", "ERM"}
-        kept = [r for r in reconcilers if r.__class__.__name__ not in bad_names]
-        return kept
-
-    def debug_identity(Y_rec_df: pd.DataFrame, base_col: str):
-        """Warn if reconciliation columns equal base (common when only bottom was forecast)."""
-        rec_cols = [c for c in Y_rec_df.columns if c.startswith(f"{base_col}/")]
-        if not rec_cols:
-            return
-        base = Y_rec_df[base_col]
-        for c in rec_cols:
-            diff = (Y_rec_df[c] - base).abs().sum()
-            if diff == 0:
-                print(f"[DEBUG] {c} is IDENTICAL to base -> reconciliation did not change forecasts.")
-
-    def shorten_reconciler_names(df: pd.DataFrame, base_col: str) -> pd.DataFrame:
-        """Shorten long reconciler column names for readability."""
-        rename_map = {}
-        for col in df.columns:
-            if col.startswith(f"{base_col}/"):
-                # Extract the reconciler method name
-                parts = col.split("/")[1:]  # e.g., ['BottomUp'], ['TopDown_method-forecast_proportions'], etc.
-                method = parts[0]
-                
-                # Create short name
-                if method == "BottomUp":
-                    short_name = f"{base_col}/BottomUp"
-                elif method.startswith("TopDown"):
-                    # TopDown_method-forecast_proportions -> TopDown_FP or TopDown_PA
-                    if "forecast_proportions" in method:
-                        short_name = f"{base_col}/TD_FP"
-                    elif "proportion_averages" in method:
-                        short_name = f"{base_col}/TD_PA"
-                    else:
-                        short_name = f"{base_col}/TD"
-                elif method.startswith("MiddleOut"):
-                    # MiddleOut_middle_level-level_1_top_down_method-forecast_proportions -> MO_FP or MO_PA
-                    if "forecast_proportions" in method:
-                        short_name = f"{base_col}/MO_FP"
-                    elif "proportion_averages" in method:
-                        short_name = f"{base_col}/MO_PA"
-                    else:
-                        short_name = f"{base_col}/MO"
-                else:
-                    short_name = col  # Keep original if not recognized
-                
-                # Handle duplicates by adding counter
-                if short_name in rename_map.values():
-                    counter = 2
-                    while f"{short_name}_{counter}" in rename_map.values():
-                        counter += 1
-                    short_name = f"{short_name}_{counter}"
-                
-                rename_map[col] = short_name
-        
-        return df.rename(columns=rename_map)
-
-    # -------------------------
     # Setup / clean
     # -------------------------
     if config is None:
@@ -430,7 +378,7 @@ def run_cv_reconcile_save_each_window(
             ml_data["unique_id"].isin(IDS) & (ml_data["ds"] <= cutoff)
         ][["unique_id", "ds", "y"]].copy()
 
-        train_raw_bottom = ensure_hier_cols(train_raw_bottom, hier_cols)
+        train_raw_bottom = ensure_hier_cols(train_raw_bottom, hier_cols, H)
 
         # IMPORTANT: rename the original unique_id to something else because aggregate will create a new unique_id
         # from the hierarchy columns by concatenating them
@@ -499,7 +447,7 @@ def run_cv_reconcile_save_each_window(
                 print(f"[DEBUG] extra in forecasts (first 10): {extra}")
 
         # ---- 3) Fitted values (needed for MinTrace/ERM). If not available, drop those reconcilers.
-        Y_fitted_df = get_fitted_values_or_none(ml_forecast)
+        Y_fitted_df = get_fitted_values_or_none(ml_forecast, best_model_name)
         has_fitted = Y_fitted_df is not None
         reconcilers_use = filter_reconcilers_if_no_fitted(reconcilers, has_fitted)
         hrec = HierarchicalReconciliation(reconcilers=reconcilers_use)
@@ -555,7 +503,7 @@ def run_cv_reconcile_save_each_window(
         # ---- 6) Evaluate like Nixtla: build TEST (ALL levels) by aggregating CV actuals
         if save_evaluation:
             test_raw_bottom = cv_w[["unique_id", "ds", "y"]].copy()
-            test_raw_bottom = ensure_hier_cols(test_raw_bottom, hier_cols)
+            test_raw_bottom = ensure_hier_cols(test_raw_bottom, hier_cols, H)
             # Rename unique_id for aggregate, just like we did for train_raw_bottom
             test_raw_bottom = test_raw_bottom.rename(columns={"unique_id": "cost_centre_id"})
             Y_test_all, _, _ = aggregate(df=test_raw_bottom, spec=H.spec)
@@ -602,8 +550,6 @@ def run_cv_reconcile_save_each_window(
     if save_evaluation and len(metrics_df):
         metrics_df.to_csv(out_dir / f"evaluation_all_cutoffs_{best_model_name}.csv", index=False)
         print(f"\n=== Evaluation Results (all cutoffs) ===")
-        print(metrics_df)
-        print(f"\n=== Evaluation Summary ===")
         print(metrics_df)
 
     return rec_df, metrics_df

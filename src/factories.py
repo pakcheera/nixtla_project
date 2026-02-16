@@ -1,24 +1,44 @@
-# ML Imports
+# Model Factory
 from lightgbm import LGBMRegressor
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
+from statsforecast.models import AutoARIMA
 
-# Stats Imports
-from statsforecast.models import AutoARIMA, SeasonalNaive, Naive
 
 class ModelFactory:
-    def get_model(model_type: str, **kwargs):
-        if 'random_state' not in kwargs:
-            kwargs['random_state'] = 42
-        if model_type == "LGBMRegressor":
-            if 'verbose' not in kwargs: kwargs['verbose'] = -1
-            return LGBMRegressor(**kwargs)
-        elif model_type == "XGBRegressor":
-            return XGBRegressor(**kwargs)
-        elif model_type == "RandomForestRegressor":
-            if 'n_jobs' not in kwargs: kwargs['n_jobs'] = -1
-            return RandomForestRegressor(**kwargs)
-        elif model_type == "AutoARIMA":
-            return AutoARIMA()
-        else:
-            raise ValueError(f"Unknown ML model: {model_type}")
+    """Factory for creating ML and statistical models with default configurations."""
+    
+    DEFAULT_PARAMS = {
+        'random_state': 42,
+    }
+    
+    MODEL_DEFAULTS = {
+        'LGBMRegressor': {'verbose': -1},
+        'XGBRegressor': {},
+        'RandomForestRegressor': {'n_jobs': -1},
+        'AutoARIMA': {},
+    }
+    
+    MODEL_REGISTRY = {
+        'LGBMRegressor': LGBMRegressor,
+        'XGBRegressor': XGBRegressor,
+        'RandomForestRegressor': RandomForestRegressor,
+        'AutoARIMA': AutoARIMA,
+    }
+    
+    @classmethod
+    def get_model(cls, model_type: str, **kwargs):
+        """Get a model instance with merged defaults."""
+        if model_type not in cls.MODEL_REGISTRY:
+            raise ValueError(f"Unknown model: {model_type}. Available: {list(cls.MODEL_REGISTRY.keys())}")
+        
+        # Merge parameters: defaults → model-specific defaults → user kwargs
+        params = {**cls.DEFAULT_PARAMS}
+        params.update(cls.MODEL_DEFAULTS.get(model_type, {}))
+        params.update(kwargs)
+        
+        # Remove non-applicable params for AutoARIMA
+        if model_type == 'AutoARIMA':
+            params = {}
+        
+        return cls.MODEL_REGISTRY[model_type](**params)

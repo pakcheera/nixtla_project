@@ -1,5 +1,7 @@
-
+src/__pycache__/
 src/models/*
 src/data/*
 src/images/*
 src/cv_outputs/*
+.DS_Store
+src/DS_Store
