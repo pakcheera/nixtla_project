@@ -46,7 +46,7 @@ class DataLoader:
         for col in self.one_hot_encode:
             df[col] = df[col].fillna("Unknown")
         df = pd.get_dummies(df, columns=self.one_hot_encode, prefix=self.one_hot_encode, dtype=np.float32, drop_first=True)
-        
+        df = df.drop_duplicates(subset=["unique_id", "ds"], keep="last")
 
         self.df = df
 

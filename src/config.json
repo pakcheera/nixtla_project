@@ -5,24 +5,48 @@
         "oc_plan": "data/planning_daily_oc_plan_20250408.csv",
         "rules_actual": "data/rule_assumptions_actual_20250408.csv",
         "rules_plan": "data/rule_assumptions_plan_20250408.csv",
-        "cost_centre": "data/cost_centre_20250408.csv"
+        "cost_centre": "data/cost_centre_20250408.csv",
+        "hierarchy_csv_path": "data/cost_centre_hierarchy_20250408_edit.csv"
     },
     "forecast": {
         "horizon": 28,
         "seasonality": 7,
-        "n_windows": 3,
+        "n_windows": 2,
         "step_size": 28,
         "num_threads": 10
     },
     "features": {
-        "lags": [1, 7, 14, 28],
-         "lag_transforms": {
-            "7": ["rolling_mean", 7, "rolling_std", 7],
-            "28": ["rolling_mean", 28,"rolling_std", 28]
+        "lags": [
+            1,
+            7,
+            14,
+            28
+        ],
+        "lag_transforms": {
+            "7": [
+                "rolling_mean",
+                7,
+                "rolling_std",
+                7
+            ],
+            "28": [
+                "rolling_mean",
+                28,
+                "rolling_std",
+                28
+            ]
         },
-        "date_features": ["month", "dayofweek", "quarter", "year"],
-        "static_features":[],
-        "one_hot_encode": ["Booking Type", "Description"]
+        "date_features": [
+            "month",
+            "dayofweek",
+            "quarter",
+            "year"
+        ],
+        "static_features": [],
+        "one_hot_encode": [
+            "Booking Type",
+            "Description"
+        ]
     },
     "model_ml": {
         "LGBMRegressor": {
@@ -41,6 +65,26 @@
         }
     },
     "model_stat": {
-       "AutoARIMA": {}
-    }
+        "AutoARIMA": {}
+    },
+    "reconcilers": [
+        {
+            "type": "BottomUp"
+        },
+        {
+            "type": "TopDown",
+            "params": {
+                "method": "forecast_proportions"
+            }
+        }
+        ,
+        {
+            "type": "MiddleOut",
+            "params": {
+                "middle_level": "level_1",
+                "top_down_method": "forecast_proportions"
+            }
+        }
+        
+    ]
 }
