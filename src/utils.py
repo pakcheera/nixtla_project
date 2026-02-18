@@ -651,8 +651,8 @@ def run_cv_reconcile_save_each_window(
             eval_tags = build_eval_tags(tags)
             
             # For evaluation, we need to keep only numeric columns and valid IDs
-            # Only select columns that won't cause issues with evaluate
-            Y_eval_numeric = Y_eval[["unique_id", "ds", "y"] + forecast_cols + hier_cols].copy()
+            # Only select columns needed for evaluation (exclude hierarchy columns which are strings)
+            Y_eval_numeric = Y_eval[["unique_id", "ds", "y"] + forecast_cols].copy()
             
             try:
                 # evaluate()
