@@ -22,16 +22,27 @@ def main():
     ml_models = build_models(config["model_ml"])
     ml_model_names = list(config["model_ml"].keys())
 
-    H = Hierarchy(config)
+    # Get raw data for hierarchy aggregation
+    raw_data = loader.get_ml_forecast()
     
-    IDS = H.bottom_ids
+    # Build hierarchy using aggregate() method
+    H = Hierarchy(config, data_df=raw_data)
+    hierarchy_data = H.get_hierarchy_data()
+    Y_df = hierarchy_data["Y_df"]
+    S_df = hierarchy_data["S_df"]
+    tags = hierarchy_data["tags"]
+    IDS = hierarchy_data["bottom_ids"]
 
-
-    ml_data = (
-        loader.get_ml_forecast()
-        .query("unique_id in @IDS")
-        .copy()
-    )
+    # Prepare data for MLForecast - keep hierarchy columns but drop them for model training
+    # We'll use the hierarchy-enriched data for reconciliation later
+    ml_data_full = Y_df.query("unique_id in @IDS").copy()
+    
+    # For MLForecast, we need only numeric columns + unique_id, ds, y
+    # Drop hierarchy columns for the model
+    hierarchy_cols = ['Root', 'Manager', 'CostCentre']
+    ml_data_for_model = ml_data_full.drop(
+        columns=[c for c in hierarchy_cols if c in ml_data_full.columns]
+    ).copy()
 
     ml_forecast = MLForecast(
         models=ml_models,
@@ -44,7 +55,7 @@ def main():
 
     cv_ml = run_cv_and_plot(
         model=ml_forecast,
-        data=ml_data,
+        data=ml_data_for_model,
         model_names=ml_model_names,
         forecast_cfg=config["forecast"],
         img_prefix="cv_ml",
@@ -62,9 +73,11 @@ def main():
     CV_OUT_DIR = Path("cv_outputs")
     cv_rec_all, metrics_df = run_cv_reconcile_save_each_window(
         cv_df=cv_ml,
-        ml_data=ml_data,
+        ml_data=ml_data_full,  # Use full data with hierarchy columns for reconciliation
         best_model_name=best_model_name,
         H=H,
+        S_df=S_df,
+        tags=tags,
         IDS=IDS,
         out_dir=CV_OUT_DIR,
         img_dir=IMG_DIR,

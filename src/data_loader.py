@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from hierarchy_spec import create_hierarchy_columns
 
 
 class DataLoader:
@@ -7,6 +8,7 @@ class DataLoader:
     
     def __init__(self, config):
         self.paths = config['paths']
+        self.hierarchy_csv_path = config['paths']['hierarchy_csv_path']
         self.static_feats = config['features']['static_features']
         self.one_hot_encode = config["features"]["one_hot_encode"]
         self.df = None
@@ -32,6 +34,15 @@ class DataLoader:
         df = grid.merge(df, on=['unique_id', 'ds'], how='left')
         df['y'] = df['y'].fillna(0)
         return df
+    
+    def _get_valid_cost_centres(self) -> set:
+        """Get set of valid cost centres from hierarchy CSV."""
+        hierarchy_df = pd.read_csv(self.hierarchy_csv_path)
+        # Extract all unique leaf nodes from the :child column
+        valid_centres = set(hierarchy_df[':child'].unique())
+        # Remove root/manager names (keep only actual cost centre IDs)
+        valid_centres = {c for c in valid_centres if pd.notna(c) and c != 'Kylie Van Der Stok'}
+        return valid_centres
     
     def _apply_one_hot_encoding(self, df: pd.DataFrame) -> pd.DataFrame:
         """Fill missing values and apply one-hot encoding."""
@@ -75,14 +86,42 @@ class DataLoader:
         # Merge all data
         df = df.merge(oc, on=['unique_id', 'ds', "Booking Type"], how='left')
         df = df.merge(rules, on=['unique_id', 'ds'], how='left')
+        
+        # Filter to only cost centres in hierarchy CSV
+        valid_centres = self._get_valid_cost_centres()
+        before_filter = len(df)
+        df = df[df['unique_id'].isin(valid_centres)].copy()
+        after_filter = len(df)
+        print(f"Filtered data: {before_filter:,} → {after_filter:,} rows ({100*after_filter/before_filter:.1f}%)")
+        
+        # Add hierarchy columns using CSV mapping
+        df = create_hierarchy_columns(df, self.hierarchy_csv_path)
+        
+        # Fill NaN values in numeric columns to avoid aggregate() errors
+        numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+        for col in numeric_cols:
+            if df[col].isna().any():
+                df[col] = df[col].fillna(0)
+        
+        # Fill NaN values in object columns
+        object_cols = df.select_dtypes(include=['object']).columns
+        for col in object_cols:
+            if df[col].isna().any():
+                df[col] = df[col].fillna("Unknown")
+        
         df = self._apply_one_hot_encoding(df)
         df = df.drop_duplicates(subset=["unique_id", "ds"], keep="last")
         
         self.df = df
     
     def get_ml_forecast(self) -> pd.DataFrame:
-        """Get data for ML forecasting."""
-        return self.df.copy().reset_index(drop=True)
+        """Get data with all features for ML forecasting.
+        
+        Returns data including hierarchy columns, ds, y, and all features.
+        Drops unique_id since aggregate() will create it from hierarchy columns.
+        """
+        # Drop unique_id because aggregate() will create it from hierarchy columns
+        return self.df.drop(columns=['unique_id']).copy().reset_index(drop=True)
     
     def get_stats_forecast(self) -> pd.DataFrame:
         """Get minimal data for statistical forecasting."""
