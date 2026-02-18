@@ -74,7 +74,7 @@
         {
             "type": "TopDown",
             "params": {
-                "method": "forecast_proportions"
+                "method": "proportion_averages"
             }
         }
         ,
@@ -82,7 +82,7 @@
             "type": "MiddleOut",
             "params": {
                 "middle_level": "level_1",
-                "top_down_method": "forecast_proportions"
+                "top_down_method": "proportion_averages"
             }
         }
         

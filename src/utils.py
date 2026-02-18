@@ -309,7 +309,7 @@ def run_cv_reconcile_save_each_window(
     config: dict | None = None,
     fe: object | None = None,
     save_evaluation: bool = True,
-    debug: bool = True,
+    debug: bool = False,
 ):
     out_dir.mkdir(exist_ok=True, parents=True)
     if img_dir is not None:
